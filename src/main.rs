@@ -1,10 +1,11 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     env,
     ffi::OsString,
-    fs::File,
+    fs::{self, File},
     hash::{Hash, Hasher},
     io::{self, BufReader},
+    iter,
     ops::Deref,
     path::{Path, PathBuf},
     thread::sleep,
@@ -12,8 +13,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use crates_index::{Index, Version};
+use colored::Colorize;
+use crates_index::{Dependency, Index, Version};
 use flate2::bufread::GzDecoder;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use tar::Archive;
 
 #[derive(Debug, Clone)]
@@ -129,24 +133,96 @@ impl Hash for VersionExt {
     }
 }
 
-// TODO: store a persistent hashset that filters out any versions we've already seen. This should
-// drastically speed up finding versions that use insta
-fn main() -> Result<()> {
-    env_logger::init();
+#[derive(Clone, Copy, Default)]
+#[must_use]
+struct Opts {
+    level: Level,
+    indent: usize,
+}
 
-    log::info!("Getting listing of crates to download...");
+impl Opts {
+    fn level(mut self, level: Level) -> Self {
+        self.level = level;
+        self
+    }
+
+    fn indent(mut self, indent: usize) -> Self {
+        self.indent = indent;
+        self
+    }
+
+    fn inc_indent(mut self) -> Self {
+        self.indent += 1;
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Level {
+    Info,
+    Warn,
+    Error,
+}
+
+impl Default for Level {
+    fn default() -> Self {
+        Self::Info
+    }
+}
+
+// TODO: Stuff using this gets pretty verbose. Work on:
+// - Making nesting more natural
+//   - use start actions and continuing actions
+// - Take a template string to avoid `format`ing every time
+// - Extend the color trait to apply to specific colors to specific types
+fn eprintln_action_cont(msg: &str, opts: Opts) {
+    let Opts { level, indent } = opts;
+
+    let arrow = match level {
+        Level::Info => "->".blue(),
+        Level::Warn => "->".magenta(),
+        Level::Error => "->".red(),
+    }
+    .bold();
+
+    let indent: String = iter::repeat("  ").take(indent).collect();
+    eprintln!("{}{} {}", indent, arrow, msg.bold());
+}
+
+fn main() -> Result<()> {
+    let spinner = ProgressBar::new(1).with_style(
+        ProgressStyle::default_spinner()
+            .template("{elapsed:>3.green.bold} {spinner:.blue.bold} {msg:!.bold}"),
+    );
+    spinner.set_message("Finding all current crates using `insta`...");
+    spinner.enable_steady_tick(100);
+
+    // Get any new versions we haven't seen before
     let index = Index::new_cargo_default()?;
-    // Get a list of all the crates that use `insta`
-    let uses_insta = index
-        .crates()
+    let new_versions = index
+        .crates_parallel()
+        .filter_map(|maybe_krate| maybe_krate.ok())
         .map(|krate| krate.highest_version().to_owned())
+        .map(VersionExt::from);
+
+    let uses_insta: Vec<_> = new_versions
         .filter(|version| {
             version
                 .dependencies()
                 .iter()
                 .any(|dep| dep.crate_name() == "insta")
-        });
+        })
+        .collect();
 
+    spinner.finish();
+    let msg = format!(
+        "{} Found {} crates using `insta`!",
+        "->".blue(),
+        uses_insta.len().to_string().blue()
+    );
+    eprintln!("{}", msg.bold());
+
+    eprintln!("{}", "Scanning locally downloaded crates...".bold());
     // See if the crate is already downloaded in
     // $CARGO_HOME/registry/src/github.com-1ecc6299db9ec823
     // If it is then search that, otherwise download it in memory and extract it while filtering
@@ -154,22 +230,45 @@ fn main() -> Result<()> {
     let local_crates = LocalCrates::new()?;
     let config = index.index_config()?;
     let download_urls: Vec<_> = uses_insta
+        .into_iter()
         .map(VersionExt::from)
         .filter(|version| !local_crates.contains(version))
         .filter_map(|version| version.download_url(&config))
         .collect();
+    if download_urls.len() == 0 {
+        eprintln_action_cont("No crates to download!", Opts::default());
+    } else {
+        let msg = format!(
+            "{} crates to download",
+            download_urls.len().to_string().blue()
+        );
+        eprintln_action_cont(&msg, Opts::default());
+    }
 
-    log::info!("    There are {} crates to download", download_urls.len());
+    eprintln!("{}", "Downloading crates...".bold());
     let cargo_registry = CargoRegistry::new()?;
     let cache_path = cargo_registry.cache();
     let src_path = cargo_registry.src();
-    for download_url in &download_urls {
-        sleep(Duration::from_millis(500));
-        log::info!("Downloading {download_url}...");
-        let resp = match ureq::get(download_url).call() {
+    let info_opts = Opts::default().inc_indent();
+    let warn_opts = info_opts.level(Level::Warn);
+    for url in &download_urls {
+        sleep(Duration::from_millis(200));
+        eprintln_action_cont(&format!("Downloading {}...", url.cyan()), info_opts);
+
+        let info_opts = info_opts.inc_indent();
+        let warn_opts = warn_opts.inc_indent();
+
+        let resp = match ureq::get(url).call() {
             Ok(resp) => resp,
             Err(err) => {
-                log::warn!("Error downloading file: {download_url}, Err: {err:?}");
+                eprintln_action_cont(
+                    &format!(
+                        "Error downloading file: {}, Err: {}",
+                        url.cyan(),
+                        err.to_string().red(),
+                    ),
+                    warn_opts,
+                );
                 continue;
             }
         };
@@ -179,16 +278,30 @@ fn main() -> Result<()> {
         let mut download_file = match File::create(&download_path) {
             Ok(file) => file,
             Err(err) => {
-                log::warn!("Failed creating file: {download_path:?}, Err: {err:?}");
+                eprintln_action_cont(
+                    &format!(
+                        "Failed creating file: {}, Err: {}",
+                        download_path.to_string_lossy().cyan(),
+                        err.to_string().red()
+                    ),
+                    warn_opts,
+                );
                 continue;
             }
         };
 
         let mut reader = BufReader::new(resp.into_reader());
         match io::copy(&mut reader, &mut download_file) {
-            Ok(_) => log::info!("    Downloaded: {file_name:?}"),
+            Ok(_) => eprintln_action_cont(&format!("Downloaded {}", file_name.cyan()), info_opts),
             Err(err) => {
-                log::warn!("Failed downloading file: {download_path:?}, Err: {err:?}");
+                eprintln_action_cont(
+                    &format!(
+                        "Failed downloading file: {}, Err: {}",
+                        file_name.cyan(),
+                        err.to_string().red()
+                    ),
+                    warn_opts,
+                );
                 continue;
             }
         }
@@ -196,7 +309,14 @@ fn main() -> Result<()> {
         let reader = match File::open(&download_path) {
             Ok(file) => file,
             Err(err) => {
-                log::warn!("Failed opening file: {download_path:?}, Err: {err:?}");
+                eprintln_action_cont(
+                    &format!(
+                        "Failed opening file: {}, Err: {}",
+                        download_path.to_string_lossy().cyan(),
+                        err.to_string().red()
+                    ),
+                    warn_opts,
+                );
                 continue;
             }
         };
@@ -204,9 +324,16 @@ fn main() -> Result<()> {
         let decompressor = GzDecoder::new(BufReader::new(reader));
         let mut archive = Archive::new(decompressor);
         match archive.unpack(&src_path) {
-            Ok(_) => log::info!("    Extracted: {file_name:?}"),
+            Ok(_) => eprintln_action_cont(&format!("Extracted {}", file_name.cyan()), info_opts),
             Err(err) => {
-                log::warn!("Failed extracting file: {download_path:?}, Err: {err:?}");
+                eprintln_action_cont(
+                    &format!(
+                        "Failed extracting file: {}, Err: {}",
+                        download_path.to_string_lossy().cyan(),
+                        err.to_string().red()
+                    ),
+                    warn_opts,
+                );
                 continue;
             }
         };
