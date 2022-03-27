@@ -13,12 +13,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use colored::Colorize;
 use crates_index::{Dependency, Index, Version};
 use flate2::bufread::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadBuilder, ThreadPoolBuilder};
 use tar::Archive;
+
+mod cli;
 
 #[derive(Debug, Clone)]
 struct CargoRegistry {
@@ -190,6 +193,12 @@ fn eprintln_action_cont(msg: &str, opts: Opts) {
 }
 
 fn main() -> Result<()> {
+    let cli::Args { dry_run, threads } = cli::Args::parse();
+
+    ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()?;
+
     let spinner = ProgressBar::new(1).with_style(
         ProgressStyle::default_spinner()
             .template("{elapsed:>3.green.bold} {spinner:.blue.bold} {msg:!.bold}"),
@@ -243,6 +252,11 @@ fn main() -> Result<()> {
             download_urls.len().to_string().blue()
         );
         eprintln_action_cont(&msg, Opts::default());
+    }
+
+    if dry_run {
+        eprintln!("{}", "Finished dry run!".bold());
+        return Ok(());
     }
 
     eprintln!("{}", "Downloading crates...".bold());
