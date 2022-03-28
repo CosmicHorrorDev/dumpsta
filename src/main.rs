@@ -80,12 +80,11 @@ struct LocalCrates {
 
 impl LocalCrates {
     fn new() -> Result<Self> {
-        // TODO: don't hardcode this anymore
-        let path =
-            Path::new("/home/wintermute/.data/cargo/registry/src/github.com-1ecc6299db9ec823/");
+        let registry = CargoRegistry::new()?;
 
         // Read over entries ignoring any errors
-        let listing = path
+        let listing = registry
+            .src()
             .read_dir()?
             .filter_map(Result::ok)
             .filter_map(|entry| entry.file_name().to_str().map(ToOwned::to_owned))
@@ -143,6 +142,15 @@ fn err(err: impl std::error::Error + Send + Sync + 'static) -> anyhow::Error {
     err.into()
 }
 
+// TODO: check cached and extracted files
+// TODO: Add a flag for force updating the index
+// - Have this store a flag and limit. We don't need people to force updates all the time
+// TODO: display the error with our `Dialog` stuff
+// TODO: spinner on potentially pulling the index?
+// TODO: Add a check to avoid scanning the full index
+// - A simple timestamp on the last check should be enough
+// TODO: Have a default out dir and an option to override
+// TODO: Check if installed, then cached, then download if needed
 fn main() -> Result<()> {
     let cli::Args { dry_run, threads } = cli::Args::parse();
 
@@ -154,7 +162,7 @@ fn main() -> Result<()> {
         ProgressStyle::default_spinner()
             .template("{elapsed:>3.green.bold} {spinner:.blue.bold} {msg:!.bold}"),
     );
-    spinner.set_message("Finding all current crates using `insta`...");
+    spinner.set_message("Finding all current crates that use `insta`...");
     spinner.enable_steady_tick(100);
 
     // Get any new versions we haven't seen before
@@ -180,7 +188,7 @@ fn main() -> Result<()> {
 
     let scan_dialog = Dialog::new("Scanning locally downloaded crates...");
     // See if the crate is already downloaded in
-    // $CARGO_HOME/registry/src/github.com-1ecc6299db9ec823
+    // $CARGO_HOME/registry/src/github.com-<hash>
     // If it is then search that, otherwise download it in memory and extract it while filtering
     // for any `.snap` files
     let local_crates = LocalCrates::new()?;
@@ -221,20 +229,28 @@ fn main() -> Result<()> {
     let cargo_registry = CargoRegistry::new()?;
     let cache_path = cargo_registry.cache();
     let src_path = cargo_registry.src();
+    let agent = ureq::builder()
+        // Setting a description user agent per crates.io crawling policy
+        .user_agent("dumpsta (github.com/LovecraftianHorror/dumpsta)")
+        .build();
+    let mut num_install_errors = 0;
     for url in pb.wrap_iter(download_urls.iter()) {
-        sleep(Duration::from_millis(200));
+        // Performing at most one request per second per crates.io crawling policy
+        sleep(Duration::from_secs(1));
         let (crate_dl_dialog, msg) = full_dl_dialog.info_str_with("Downloading {}...", disps![url]);
         pb.println(msg);
 
-        let resp = match ureq::get(url).call() {
+        let resp = match agent.get(url).call() {
             Ok(resp) => resp,
             Err(e) => {
                 crate_dl_dialog
                     .warn_with("Error downloading file: {}, Err: {}", disps![url, err(e)]);
+                num_install_errors += 1;
                 continue;
             }
         };
 
+        // TODO: combine together creating and downloading the file
         let file_name = resp.get_url().rsplit_once('/').unwrap().1.to_owned();
         let dl_path = cache_path.join(&file_name);
         let mut dl_file = match File::create(&dl_path) {
@@ -242,31 +258,31 @@ fn main() -> Result<()> {
             Err(e) => {
                 crate_dl_dialog
                     .warn_with("Failed creating file: {}, Err: {}", disps![dl_path, err(e)]);
+                num_install_errors += 1;
                 continue;
             }
         };
 
         let mut reader = BufReader::new(resp.into_reader());
         match io::copy(&mut reader, &mut dl_file) {
-            Ok(_) => {
-                let (_, msg) =
-                    crate_dl_dialog.info_str_with("Downloaded {}", disps![file_name.clone()]);
-                pb.println(msg);
-            }
+            Ok(_) => {}
             Err(e) => {
                 crate_dl_dialog.warn_with(
                     "Failed downloading file: {}, Err: {}",
                     disps![file_name, err(e)],
                 );
+                num_install_errors += 1;
                 continue;
             }
         }
 
+        // TODO: combine together opening and extracting the file
         let reader = match File::open(&dl_path) {
             Ok(file) => file,
             Err(e) => {
                 crate_dl_dialog
                     .warn_with("Failed opening file: {}, Err: {}", disps![dl_path, err(e)]);
+                num_install_errors += 1;
                 continue;
             }
         };
@@ -275,8 +291,11 @@ fn main() -> Result<()> {
         let mut archive = Archive::new(decompressor);
         match archive.unpack(&src_path) {
             Ok(_) => {
-                let (_, msg) =
-                    crate_dl_dialog.msg_str_with(Color::Green, "Extracted {}", disps![file_name]);
+                let (_, msg) = crate_dl_dialog.msg_str_with(
+                    Color::Green,
+                    "Downloaded and extracted {}",
+                    disps![file_name],
+                );
                 pb.println(msg);
             }
             Err(e) => {
@@ -284,9 +303,14 @@ fn main() -> Result<()> {
                     "Failed extracting file: {}, Err: {}",
                     disps![dl_path, err(e)],
                 );
+                num_install_errors += 1;
                 continue;
             }
         }
+    }
+
+    if num_install_errors != 0 {
+        full_dl_dialog.warn_with("Failed pulling {} crates", disps![num_install_errors]);
     }
 
     Ok(())

@@ -5,6 +5,7 @@ use std::{
 };
 
 use colored::{Color, Colorize};
+use paste::paste;
 
 // Like `vec![]`, but the values can be heterogeneous as long as they can be used in `Disp::from`
 macro_rules! disps {
@@ -98,23 +99,6 @@ impl From<&Path> for Disp {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Level {
-    Info,
-    Warn,
-    Error,
-}
-
-impl From<Level> for Color {
-    fn from(level: Level) -> Color {
-        match level {
-            Level::Info => Color::Blue,
-            Level::Warn => Color::Magenta,
-            Level::Error => Color::Red,
-        }
-    }
-}
-
 // TODO: take a &str
 enum Segment {
     Text(String),
@@ -181,12 +165,37 @@ impl FmtStr {
     }
 }
 
+macro_rules! gen_dialog_level_methods {
+    ($level:ident, $color:expr) => {
+        paste! {
+            #[allow(dead_code)]
+            pub fn $level(&self, msg: &str) -> Self {
+                self.[<$level _with>](msg, &[])
+            }
+
+            #[allow(dead_code)]
+            pub fn [<$level _with>](&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
+                self.msg_with($color, msg, disps)
+            }
+
+            #[allow(dead_code)]
+            pub fn [<$level _str>](&self, msg: &str) -> (Self, String) {
+                self.[<$level _str_with>](msg, &[])
+            }
+
+            #[allow(dead_code)]
+            pub fn [<$level _str_with>](&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
+                self.msg_str_with($color, msg, disps)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Dialog {
     indent: NonZeroUsize,
 }
 
-// TODO: make these operations fallible
 impl Dialog {
     pub fn raw_with_indent(indent: NonZeroUsize) -> Self {
         Self { indent }
@@ -208,62 +217,9 @@ impl Dialog {
         }
     }
 
-    pub fn info(&self, msg: &str) -> Self {
-        self.info_with(msg, &[])
-    }
-
-    pub fn info_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
-        self.msg_with(Level::Info.into(), msg, disps)
-    }
-
-    #[allow(dead_code)]
-    pub fn info_str(&self, msg: &str) -> (Self, String) {
-        self.info_str_with(msg, &[])
-    }
-
-    #[allow(dead_code)]
-    pub fn info_str_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
-        self.msg_str_with(Level::Info.into(), msg, disps)
-    }
-
-    #[allow(dead_code)]
-    pub fn warn(&self, msg: &str) -> Self {
-        self.warn_with(msg, &[])
-    }
-
-    pub fn warn_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
-        self.msg_with(Level::Warn.into(), msg, disps)
-    }
-
-    #[allow(dead_code)]
-    pub fn warn_str(&self, msg: &str) -> (Self, String) {
-        self.warn_str_with(msg, &[])
-    }
-
-    #[allow(dead_code)]
-    pub fn warn_str_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
-        self.msg_str_with(Level::Warn.into(), msg, disps)
-    }
-
-    #[allow(dead_code)]
-    pub fn error(&self, msg: &str) -> Self {
-        self.error_with(msg, &[])
-    }
-
-    #[allow(dead_code)]
-    pub fn error_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
-        self.msg_with(Level::Error.into(), msg, disps)
-    }
-
-    #[allow(dead_code)]
-    pub fn error_str(&self, msg: &str) -> (Self, String) {
-        self.error_str_with(msg, &[])
-    }
-
-    #[allow(dead_code)]
-    pub fn error_str_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
-        self.msg_str_with(Level::Error.into(), msg, disps)
-    }
+    gen_dialog_level_methods!(info, Color::Blue);
+    gen_dialog_level_methods!(warn, Color::Magenta);
+    gen_dialog_level_methods!(error, Color::Red);
 
     #[allow(dead_code)]
     pub fn msg(&self, color: Color, msg: &str) -> Self {
