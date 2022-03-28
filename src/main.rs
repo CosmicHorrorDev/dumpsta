@@ -14,6 +14,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use colored::{Color, Colorize};
 use crates_index::{Index, Version};
 use flate2::bufread::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -201,13 +202,29 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // let urls_iter = download_urls.iter();
+    let pb = ProgressBar::new(download_urls.len() as u64).with_style(
+        ProgressStyle::default_bar()
+            .template(&format!(
+                "{} {}{{pos:.cyan.bold}}{}{{len:.cyan.bold}}{} {}{{bar:60.blue}}{} {} {{eta:<3.green.bold}}",
+                "Downloading:".bold(),
+                "(".cyan().bold(),
+                "/".cyan().bold(),
+                ")".cyan().bold(),
+                "|".bold(),
+                "|".bold(),
+                "eta".green().bold(),
+            ))
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
     let full_dl_dialog = Dialog::new("Downloading crates...");
     let cargo_registry = CargoRegistry::new()?;
     let cache_path = cargo_registry.cache();
     let src_path = cargo_registry.src();
-    for url in &download_urls {
+    for url in pb.wrap_iter(download_urls.iter()) {
         sleep(Duration::from_millis(200));
-        let crate_dl_dialog = full_dl_dialog.info_with("Downloading {}...", disps![url]);
+        let (crate_dl_dialog, msg) = full_dl_dialog.info_str_with("Downloading {}...", disps![url]);
+        pb.println(msg);
 
         let resp = match ureq::get(url).call() {
             Ok(resp) => resp,
@@ -231,7 +248,11 @@ fn main() -> Result<()> {
 
         let mut reader = BufReader::new(resp.into_reader());
         match io::copy(&mut reader, &mut dl_file) {
-            Ok(_) => crate_dl_dialog.info_with("Downloaded {}", disps![file_name.clone()]),
+            Ok(_) => {
+                let (_, msg) =
+                    crate_dl_dialog.info_str_with("Downloaded {}", disps![file_name.clone()]);
+                pb.println(msg);
+            }
             Err(e) => {
                 crate_dl_dialog.warn_with(
                     "Failed downloading file: {}, Err: {}",
@@ -239,7 +260,7 @@ fn main() -> Result<()> {
                 );
                 continue;
             }
-        };
+        }
 
         let reader = match File::open(&dl_path) {
             Ok(file) => file,
@@ -253,7 +274,11 @@ fn main() -> Result<()> {
         let decompressor = GzDecoder::new(BufReader::new(reader));
         let mut archive = Archive::new(decompressor);
         match archive.unpack(&src_path) {
-            Ok(_) => crate_dl_dialog.info_with("Extracted {}", disps![file_name]),
+            Ok(_) => {
+                let (_, msg) =
+                    crate_dl_dialog.msg_str_with(Color::Green, "Extracted {}", disps![file_name]);
+                pb.println(msg);
+            }
             Err(e) => {
                 crate_dl_dialog.warn_with(
                     "Failed extracting file: {}, Err: {}",
@@ -261,7 +286,7 @@ fn main() -> Result<()> {
                 );
                 continue;
             }
-        };
+        }
     }
 
     Ok(())

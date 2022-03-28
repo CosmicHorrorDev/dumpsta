@@ -105,6 +105,16 @@ enum Level {
     Error,
 }
 
+impl From<Level> for Color {
+    fn from(level: Level) -> Color {
+        match level {
+            Level::Info => Color::Blue,
+            Level::Warn => Color::Magenta,
+            Level::Error => Color::Red,
+        }
+    }
+}
+
 // TODO: take a &str
 enum Segment {
     Text(String),
@@ -203,7 +213,17 @@ impl Dialog {
     }
 
     pub fn info_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
-        self.msg_with(Level::Info, msg, disps.as_ref())
+        self.msg_with(Level::Info.into(), msg, disps)
+    }
+
+    #[allow(dead_code)]
+    pub fn info_str(&self, msg: &str) -> (Self, String) {
+        self.info_str_with(msg, &[])
+    }
+
+    #[allow(dead_code)]
+    pub fn info_str_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
+        self.msg_str_with(Level::Info.into(), msg, disps)
     }
 
     #[allow(dead_code)]
@@ -212,7 +232,17 @@ impl Dialog {
     }
 
     pub fn warn_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
-        self.msg_with(Level::Warn, msg, disps.as_ref())
+        self.msg_with(Level::Warn.into(), msg, disps)
+    }
+
+    #[allow(dead_code)]
+    pub fn warn_str(&self, msg: &str) -> (Self, String) {
+        self.warn_str_with(msg, &[])
+    }
+
+    #[allow(dead_code)]
+    pub fn warn_str_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
+        self.msg_str_with(Level::Warn.into(), msg, disps)
     }
 
     #[allow(dead_code)]
@@ -222,26 +252,54 @@ impl Dialog {
 
     #[allow(dead_code)]
     pub fn error_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
-        self.msg_with(Level::Error, msg, disps.as_ref())
+        self.msg_with(Level::Error.into(), msg, disps)
     }
 
-    fn msg_with(&self, level: Level, msg: &str, disps: &[Disp]) -> Self {
-        let arrow = match level {
-            Level::Info => "->".blue(),
-            Level::Warn => "->".magenta(),
-            Level::Error => "->".red(),
-        }
-        .bold();
+    #[allow(dead_code)]
+    pub fn error_str(&self, msg: &str) -> (Self, String) {
+        self.error_str_with(msg, &[])
+    }
+
+    #[allow(dead_code)]
+    pub fn error_str_with(&self, msg: &str, disps: impl AsRef<[Disp]>) -> (Self, String) {
+        self.msg_str_with(Level::Error.into(), msg, disps)
+    }
+
+    #[allow(dead_code)]
+    pub fn msg(&self, color: Color, msg: &str) -> Self {
+        self.msg_with(color, msg, &[])
+    }
+
+    #[allow(dead_code)]
+    pub fn msg_with(&self, color: Color, msg: &str, disps: impl AsRef<[Disp]>) -> Self {
+        let (sub_dialog, msg) = self.msg_str_with(color, msg, disps);
+        eprintln!("{msg}");
+        sub_dialog
+    }
+
+    #[allow(dead_code)]
+    pub fn msg_str(&self, color: Color, msg: &str) -> (Self, String) {
+        self.msg_str_with(color, msg, &[])
+    }
+
+    pub fn msg_str_with(
+        &self,
+        color: Color,
+        msg: &str,
+        disps: impl AsRef<[Disp]>,
+    ) -> (Self, String) {
+        let arrow = "->".color(color).bold();
 
         let indent_str: String = iter::repeat("  ").take(self.indent.get() - 1).collect();
 
         let fmt_str = FmtStr::try_new(msg).unwrap();
-        let msg = fmt_str.try_fmt(disps).unwrap();
-        eprintln!("{}{} {}", indent_str, arrow, msg);
+        let msg = fmt_str.try_fmt(disps.as_ref()).unwrap();
+        let pretty_msg = format!("{}{} {}", indent_str, arrow, msg);
 
         let indent = self.indent.get().saturating_add(1);
-        Self {
+        let sub_dialog = Self {
             indent: NonZeroUsize::new(indent).unwrap(),
-        }
+        };
+        (sub_dialog, pretty_msg)
     }
 }
